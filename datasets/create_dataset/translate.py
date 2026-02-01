@@ -23,6 +23,7 @@ class Translate:
             model_name,
             torch_dtype=torch.bfloat16,
             device_map="cuda:0",
+            # device_map="auto",
             low_cpu_mem_usage=True,
         )
 
@@ -55,6 +56,8 @@ class Translate:
         input_ids = encoded["input_ids"].to(self.model.device)
         attention_mask = encoded["attention_mask"].to(self.model.device)
 
+        input_length = input_ids.shape[1]
+
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
@@ -71,7 +74,9 @@ class Translate:
 
         translations = []
         for output in outputs:
-            decoded = self.tokenizer.decode(output, skip_special_tokens=True)
+            # crop out input
+            generated_tokens = output[input_length:]
+            decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
             if "without additional explanation." in decoded:
                 translation = decoded.split("without additional explanation.")[
                     -1
