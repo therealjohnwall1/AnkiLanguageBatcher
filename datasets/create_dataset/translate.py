@@ -2,6 +2,7 @@ from typing import List
 
 import numpy as np
 import torch
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -12,67 +13,52 @@ class Translate:
 
         print(f"Loading model on {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="cuda:0",
             low_cpu_mem_usage=True,
         )
 
     def translate_batch(
         self, phrases: List[str], src_lang="Vietnamese", tgt_lang="English"
     ) -> List[str]:
-        all_messages = []
+        all_prompts = []
         for phrase in phrases:
-            messages = [
-                {
-                    "role": "user",
-                    "content": f"Translate the following segment into {tgt_lang}, without additional explanation.\n\n{phrase}",
-                }
-            ]
-            all_messages.append(messages)
+            prompt = f"Translate the following segment into {tgt_lang}, without additional explanation.\n\n{phrase}"
+            all_prompts.append(prompt)
 
-        tokenized_inputs = []
-        for messages in all_messages:
-            tokenized = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=False,
-                return_tensors="pt",
+        formatted_prompts = []
+        for prompt in all_prompts:
+            messages = [{"role": "user", "content": prompt}]
+            formatted = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
             )
-            tokenized_inputs.append(tokenized)
+            formatted_prompts.append(formatted)
 
-        # Pad to same length
-        max_len = max(t.shape[1] for t in tokenized_inputs)
-        padded_inputs = []
-        attention_masks = []
+        self.tokenizer.padding_side = "left"
 
-        for tokenized in tokenized_inputs:
-            pad_len = max_len - tokenized.shape[1]
-            if pad_len > 0:
-                padding = torch.full(
-                    (1, pad_len),
-                    self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-                    dtype=tokenized.dtype,
-                )
-                padded = torch.cat([tokenized, padding], dim=1)
-                mask = torch.cat(
-                    [torch.ones_like(tokenized), torch.zeros_like(padding)], dim=1
-                )
-            else:
-                padded = tokenized
-                mask = torch.ones_like(tokenized)
+        encoded = self.tokenizer(
+            formatted_prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=False,
+            add_special_tokens=False,
+        )
 
-            padded_inputs.append(padded)
-            attention_masks.append(mask)
-
-        batch_input_ids = torch.cat(padded_inputs, dim=0).to(self.model.device)
-        batch_attention_mask = torch.cat(attention_masks, dim=0).to(self.model.device)
+        input_ids = encoded["input_ids"].to(self.model.device)
+        attention_mask = encoded["attention_mask"].to(self.model.device)
 
         with torch.no_grad():
             outputs = self.model.generate(
-                batch_input_ids,
-                attention_mask=batch_attention_mask,
+                input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=2048,
                 num_beams=5,
                 early_stopping=True,
@@ -80,7 +66,7 @@ class Translate:
                 top_p=0.6,
                 repetition_penalty=1.05,
                 temperature=0.7,
-                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
 
         translations = []
@@ -103,10 +89,18 @@ class Translate:
         phrases_list = phrases.flatten().tolist()
 
         all_translations = []
-        for i in range(0, len(phrases_list), self.batch_size):
-            batch = phrases_list[i : i + self.batch_size]
-            translations = self.translate_batch(batch, src_lang, tgt_lang)
-            all_translations.extend(translations)
+
+        with tqdm(
+            total=len(phrases_list),
+            desc=f"Translating {src_lang}→{tgt_lang}",
+            unit="phrase",
+            ncols=100,
+        ) as pbar:
+            for i in range(0, len(phrases_list), self.batch_size):
+                batch = phrases_list[i : i + self.batch_size]
+                translations = self.translate_batch(batch, src_lang, tgt_lang)
+                all_translations.extend(translations)
+                pbar.update(len(batch))
 
         translations_array = np.array(all_translations).reshape(original_shape)
         return translations_array
