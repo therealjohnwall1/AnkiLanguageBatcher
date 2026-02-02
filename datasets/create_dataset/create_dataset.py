@@ -2,38 +2,68 @@ import os
 
 import numpy as np
 from files import pull_language_files
+from speaker_viet import SpeakerViet
 from translate import Translate
 
 
-def create_dataset(save_path="../vietnamse_translations", batch_size=8):
-    top_words_f, top_sentences_f = pull_language_files()
-    slater = Translate(batch_size=batch_size)  # change on gpu
+def translate_dataset(input_data, save_path, name, batch_size=8):
+    translator = Translate(batch_size=batch_size)
+    translations = translator.translate(input_data)
 
-    top_words_l = slater.translate(top_words_f)
-    top_sentences_l = slater.translate(top_sentences_f)
-
-    words = np.column_stack((top_words_f, top_words_l))
-    sentences = np.column_stack((top_sentences_f, top_sentences_l))
-    print(words.shape, sentences.shape)
+    combined = np.column_stack((input_data, translations))
 
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    np.save(os.path.join(save_path, "words"), words)
-    np.save(os.path.join(save_path, "sentences"), sentences)
+    output_path = os.path.join(save_path, f"{name}.npy")
+    np.save(output_path, combined)
+
+    return output_path
 
 
-def save_txt(save_path="../vietnamse_translations"):
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
+def generate_audio(npy_path, audio_dir, batch_size=8):
+    data = np.load(npy_path)
+    source_text = data[:, 0]
 
-    x = np.load(os.path.join(save_path, "words.npy"))
-    np.savetxt(os.path.join(save_path, "words.txt"), x, fmt="%s")
+    if not os.path.exists(audio_dir):
+        os.makedirs(audio_dir)
 
-    x = np.load(os.path.join(save_path, "sentences.npy"))
-    np.savetxt(os.path.join(save_path, "sentences.txt"), x, fmt="%s")
+    speaker = SpeakerViet(output_dir=audio_dir, batch_size=batch_size)
+    audio_paths = speaker.synthesize(source_text)
+    speaker.close()
+
+    combined = np.column_stack((data, audio_paths))
+    np.save(npy_path, combined)
+
+    return npy_path
+
+
+def save_txt(npy_path):
+    data = np.load(npy_path)
+    txt_path = npy_path.replace(".npy", ".txt")
+    np.savetxt(txt_path, data, fmt="%s", delimiter=",")
+    return txt_path
 
 
 if __name__ == "__main__":
-    create_dataset(batch_size=32)
-    save_txt()
+    save_path = "../vietnamse_translations"
+    audio_dir = os.path.join(save_path, "audio")
+    batch_size = 32
+
+    words_data, sentences_data = pull_language_files()
+
+    words_npy = translate_dataset(words_data, save_path, "words", batch_size)
+    sentences_npy = translate_dataset(
+        sentences_data, save_path, "sentences", batch_size
+    )
+
+    # words_npy = "../vietnamse_translations/words.npy"
+    # sentences_npy = "../vietnamse_translations/sentences.npy"
+
+    words_npy = generate_audio(words_npy, os.path.join(audio_dir, "words"), batch_size)
+    sentences_npy = generate_audio(
+        sentences_npy, os.path.join(audio_dir, "sentences"), batch_size
+    )
+
+    save_txt(words_npy)
+    save_txt(sentences_npy)
